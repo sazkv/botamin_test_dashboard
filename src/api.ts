@@ -1,0 +1,210 @@
+import type { CallFilters, CallRecord, RawCallRecord } from "./types";
+
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/$/, "");
+
+type RequestOptions = RequestInit & { allowNotFound?: boolean };
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+
+  if (options.allowNotFound && response.status === 404) {
+    return undefined as T;
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`${response.status} ${response.statusText}${body ? `: ${body}` : ""}`);
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  return response.json() as Promise<T>;
+}
+
+function firstString(raw: RawCallRecord, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = raw[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return undefined;
+}
+
+function firstBoolean(raw: RawCallRecord, keys: string[]): boolean | undefined {
+  for (const key of keys) {
+    const value = raw[key];
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+      const normalized = value.toLowerCase().trim();
+      if (["true", "yes", "1", "да"].includes(normalized)) return true;
+      if (["false", "no", "0", "нет"].includes(normalized)) return false;
+    }
+  }
+  return undefined;
+}
+
+function firstNumber(raw: RawCallRecord, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = raw[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  }
+  return undefined;
+}
+
+function durationSeconds(raw: RawCallRecord): number | undefined {
+  const direct = firstNumber(raw, ["duration_seconds", "call_duration_seconds"]);
+  if (direct !== undefined) return direct;
+
+  const value = raw.duration ?? raw.call_duration ?? raw["длительность мин:сек"];
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 0 && value < 1 ? Math.round(value * 24 * 60 * 60) : value;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const match = /^(\d{1,3}):(\d{2})$/.exec(trimmed);
+    if (match) return Number(match[1]) * 60 + Number(match[2]);
+    if (Number.isFinite(Number(trimmed))) return Number(trimmed);
+  }
+  return undefined;
+}
+
+function parseTranscript(value: unknown): { messages?: CallRecord["transcript"]; text?: string } {
+  if (Array.isArray(value)) {
+    const messages = value
+      .map((item) => {
+        if (!item || typeof item !== "object") return undefined;
+        const record = item as Record<string, unknown>;
+        const roleValue = String(record.role || record.speaker || "system").toLowerCase();
+        const role = roleValue.includes("bot") ? "bot" : roleValue.includes("user") || roleValue.includes("client") ? "user" : "system";
+        const text = String(record.text || record.message || record.content || "").trim();
+        return text ? { role, text } : undefined;
+      })
+      .filter(Boolean) as CallRecord["transcript"];
+    return messages?.length ? { messages } : {};
+  }
+
+  if (typeof value !== "string" || !value.trim()) return {};
+
+  const lines = value
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const messages = lines
+    .map((line) => {
+      const match = /^(bot|assistant|user|client|клиент|бот)\s*:\s*(.+)$/i.exec(line);
+      if (!match) return undefined;
+      const speaker = match[1].toLowerCase();
+      return { role: speaker.includes("bot") || speaker.includes("бот") || speaker.includes("assistant") ? "bot" : "user", text: match[2].trim() };
+    })
+    .filter(Boolean) as CallRecord["transcript"];
+
+  return messages?.length === lines.length ? { messages } : { text: value };
+}
+
+function normalizeDate(value?: string): string | undefined {
+  if (!value) return undefined;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 20000 && numeric < 80000) {
+    const epoch = new Date(Date.UTC(1899, 11, 30));
+    epoch.setUTCDate(epoch.getUTCDate() + Math.floor(numeric));
+    const dayFraction = numeric - Math.floor(numeric);
+    epoch.setUTCSeconds(Math.round(dayFraction * 24 * 60 * 60));
+    return epoch.toISOString();
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
+}
+
+export function normalizeCall(raw: RawCallRecord): CallRecord {
+  const transcriptSource = raw.transcript || raw.dialogue_history || raw.dialog_history || raw["история диалога юзер-бот"];
+  const transcript = parseTranscript(transcriptSource);
+  const id = firstString(raw, ["id", "uuid", "call_id", "callId", "record_id"]) || firstString(raw, ["audio_url", "recording_url", "запись аудио"]) || crypto.randomUUID();
+  const phone = firstString(raw, ["phone", "client_phone", "customer_phone", "телефон"]);
+  const client = firstString(raw, ["client", "client_name", "customer", "customer_name", "name", "phone", "телефон"]) || "Без имени";
+
+  return {
+    id,
+    client,
+    phone,
+    company: firstString(raw, ["company", "company_name", "organization"]),
+    callStartedAt: normalizeDate(firstString(raw, ["call_started_at", "started_at", "date_time", "datetime", "дата и время"])),
+    durationSeconds: durationSeconds(raw),
+    normalizedStatus: firstString(raw, ["normalized_status", "status_normalized", "status", "статус"]),
+    technicalStatus: firstString(raw, ["technical_status", "technicalStatus", "provider_status", "raw_status", "статус"]),
+    audioUrl: firstString(raw, ["audio_url", "recording_url", "record_url", "audio", "запись аудио"]),
+    endReason: firstString(raw, ["end_reason", "hangup_reason", "finish_reason", "причина завершения"]),
+    result: firstString(raw, ["result", "call_result", "outcome"]),
+    contactType: firstString(raw, ["contact_type", "contactType"]),
+    maxFunnelStage: firstString(raw, ["max_funnel_stage", "maxFunnelStage", "funnel_stage", "stage"]),
+    funnelStage: firstString(raw, ["funnel_stage", "stage", "manual_funnel_stage"]),
+    failureStage: firstString(raw, ["failure_stage", "failed_stage", "dropoff_stage", "where_failed", "manual_failure_stage"]),
+    failureReason: firstString(raw, ["failure_reason", "dropoff_reason", "failed_reason", "manual_failure_reason"]),
+    aiSummary: firstString(raw, ["ai_summary", "summary"]),
+    aiComment: firstString(raw, ["ai_comment", "comment"]),
+    answered: firstBoolean(raw, ["answered", "is_answered"]),
+    meaningfulConversation: firstBoolean(raw, ["meaningful_conversation", "is_meaningful", "meaningful"]),
+    meetingOffered: firstBoolean(raw, ["meeting_offered", "is_meeting_offered"]),
+    meetingScheduled: firstBoolean(raw, ["meeting_scheduled", "is_meeting_scheduled"]),
+    expertCallTime: firstString(raw, ["expert_call_time", "meeting_time", "scheduled_at"]),
+    qualification: firstString(raw, ["qualification", "lead_qualification"]),
+    qualificationConfidence: firstNumber(raw, ["qualification_confidence", "ai_confidence", "confidence"]),
+    qualificationIsCorrect: firstBoolean(raw, ["qualification_is_correct", "qualificationCorrect"]) ?? null,
+    checkedByAnalyst: firstBoolean(raw, ["checked_by_analyst", "is_checked", "reviewed"]),
+    manualQualification: firstString(raw, ["manual_qualification"]),
+    manualFunnelStage: firstString(raw, ["manual_funnel_stage"]),
+    manualFailureStage: firstString(raw, ["manual_failure_stage"]),
+    manualFailureReason: firstString(raw, ["manual_failure_reason"]),
+    analystComment: firstString(raw, ["analyst_comment"]),
+    transcript: transcript.messages,
+    transcriptText: transcript.text,
+    raw,
+  };
+}
+
+function filtersToQuery(filters?: Partial<CallFilters>): string {
+  if (!filters) return "";
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "" || value === false) return;
+    params.set(key, String(value));
+  });
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+export async function fetchCalls(filters?: Partial<CallFilters>): Promise<CallRecord[]> {
+  const data = await request<RawCallRecord[] | { items?: RawCallRecord[]; calls?: RawCallRecord[]; data?: RawCallRecord[] }>(`/calls${filtersToQuery(filters)}`);
+  const items = Array.isArray(data) ? data : data.items || data.calls || data.data || [];
+  return items.map(normalizeCall);
+}
+
+export async function fetchCall(id: string): Promise<CallRecord | undefined> {
+  const data = await request<RawCallRecord | undefined>(`/calls/${encodeURIComponent(id)}`, { allowNotFound: true });
+  return data ? normalizeCall(data) : undefined;
+}
+
+export type AnalystReviewPayload = {
+  qualification_is_correct: boolean | null;
+  manual_qualification: string;
+  manual_funnel_stage: string;
+  manual_failure_stage: string;
+  manual_failure_reason: string;
+  analyst_comment: string;
+};
+
+export async function saveAnalystReview(id: string, payload: AnalystReviewPayload): Promise<CallRecord | undefined> {
+  const data = await request<RawCallRecord | undefined>(`/calls/${encodeURIComponent(id)}/analyst-review`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  return data ? normalizeCall(data) : undefined;
+}
