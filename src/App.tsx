@@ -8,10 +8,12 @@ import {
   formatDate,
   formatDateTime,
   formatDuration,
+  formatStatus,
   formatTime,
   funnelStageOptions,
   qualificationOptions,
   stageLabels,
+  statusOptions,
 } from "./analytics";
 import type { AnalyticsSnapshot, CallFilters, CallRecord, FunnelNode, FunnelNodeId, TabId } from "./types";
 
@@ -101,7 +103,7 @@ function App() {
         {error && <div className="error-banner">API error: {error}</div>}
         {loading && <div className="loading-panel">Загружаем звонки из API...</div>}
 
-        {!loading && activeTab === "dashboard" && <Dashboard analytics={analytics} onNodeClick={openCallsWithNode} onOpenCall={openCall} />}
+        {!loading && activeTab === "dashboard" && <Dashboard analytics={analytics} onNodeClick={openCallsWithNode} />}
         {!loading && activeTab === "calls" && <CallsTab calls={filteredCalls} filters={filters} setFilters={setFilters} onOpenCall={openCall} />}
       </main>
 
@@ -110,7 +112,7 @@ function App() {
   );
 }
 
-function Dashboard({ analytics, onNodeClick, onOpenCall }: { analytics: AnalyticsSnapshot; onNodeClick: (nodeId: FunnelNodeId) => void; onOpenCall: (call: CallRecord) => void }) {
+function Dashboard({ analytics, onNodeClick }: { analytics: AnalyticsSnapshot; onNodeClick: (nodeId: FunnelNodeId) => void }) {
   return (
     <div className="dashboard-grid">
       <section className="kpi-grid" aria-label="KPI">
@@ -129,7 +131,7 @@ function Dashboard({ analytics, onNodeClick, onOpenCall }: { analytics: Analytic
             <p>Клик по узлу откроет Calls с применённым фильтром.</p>
           </div>
         </div>
-        <FunnelTree node={analytics.funnel} onNodeClick={onNodeClick} root />
+        <FunnelTree node={analytics.funnel} total={analytics.funnel.count} parentCount={analytics.funnel.count} onNodeClick={onNodeClick} root />
       </section>
 
       <section className="panel">
@@ -141,10 +143,10 @@ function Dashboard({ analytics, onNodeClick, onOpenCall }: { analytics: Analytic
         </div>
         <div className="loss-list">
           {analytics.losses.length ? analytics.losses.map((row) => (
-            <div className="loss-row" key={`${row.stage}-${row.reason}`}>
+            <div className="loss-row" key={row.stage}>
               <div>
                 <strong>{row.stage}</strong>
-                <span>{row.reason}</span>
+                <span>{row.recommendation}</span>
               </div>
               <div className="loss-bar" aria-hidden="true"><i style={{ width: `${Math.min(row.share * 100, 100)}%` }} /></div>
               <b>{row.count}</b>
@@ -157,19 +159,20 @@ function Dashboard({ analytics, onNodeClick, onOpenCall }: { analytics: Analytic
       <section className="panel">
         <div className="panel-header">
           <div>
-            <h2>Очередь для аналитика</h2>
-            <p>Сначала звонки с конфликтами или недостающей квалификацией.</p>
+            <h2>Что проверить аналитику</h2>
+            <p>Агрегированные группы для ручной проверки во вкладке Calls.</p>
           </div>
         </div>
-        <div className="queue-list">
-          {analytics.reviewQueue.length ? analytics.reviewQueue.map(({ call, reasons }) => (
-            <button className="queue-item" key={call.id} onClick={() => onOpenCall(call)}>
+        <div className="focus-list">
+          {analytics.reviewFocus.length ? analytics.reviewFocus.map((item) => (
+            <article className="focus-item" key={item.label}>
               <div>
-                <strong>{call.client}</strong>
-                <span>{formatDateTime(call.callStartedAt)} · {call.company || ""}</span>
+                <strong>{item.label}</strong>
+                <span>{item.recommendation}</span>
               </div>
-              <p>{reasons.join("; ")}</p>
-            </button>
+              <b>{item.count.toLocaleString("ru-RU")}</b>
+              <em>{Math.round(item.share * 100)}%</em>
+            </article>
           )) : <EmptyState text="Приоритетных звонков для ручной проверки нет." />}
         </div>
       </section>
@@ -177,16 +180,24 @@ function Dashboard({ analytics, onNodeClick, onOpenCall }: { analytics: Analytic
   );
 }
 
-function FunnelTree({ node, onNodeClick, root = false }: { node: FunnelNode; onNodeClick: (nodeId: FunnelNodeId) => void; root?: boolean }) {
+function FunnelTree({ node, total, parentCount, onNodeClick, root = false }: { node: FunnelNode; total: number; parentCount: number; onNodeClick: (nodeId: FunnelNodeId) => void; root?: boolean }) {
+  const parentShare = parentCount ? Math.round((node.count / parentCount) * 100) : 0;
+  const totalShare = total ? Math.round((node.count / total) * 100) : 0;
   return (
     <div className={root ? "funnel-tree root" : "funnel-tree"}>
-      <button className="funnel-node" onClick={() => onNodeClick(node.id)}>
+      <button className={`funnel-node ${node.kind || "neutral"} node-${node.id}`} onClick={() => onNodeClick(node.id)}>
         <span>{node.label}</span>
         <strong>{node.count.toLocaleString("ru-RU")}</strong>
+        <small>{parentShare}% от родителя · {totalShare}% от всех</small>
       </button>
       {node.children && (
         <div className="funnel-children">
-          {node.children.map((child) => <FunnelTree key={child.id} node={child} onNodeClick={onNodeClick} />)}
+          {node.children.map((child) => (
+            <div className="funnel-edge" key={child.id}>
+              <span className={child.kind === "loss" ? "edge-loss" : ""}>{node.count ? Math.round((child.count / node.count) * 100) || 0 : 0}%</span>
+              <FunnelTree node={child} total={total} parentCount={node.count} onNodeClick={onNodeClick} />
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -194,6 +205,8 @@ function FunnelTree({ node, onNodeClick, root = false }: { node: FunnelNode; onN
 }
 
 function CallsTab({ calls, filters, setFilters, onOpenCall }: { calls: CallRecord[]; filters: CallFilters; setFilters: Dispatch<SetStateAction<CallFilters>>; onOpenCall: (call: CallRecord) => void }) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
   function setFilter<K extends keyof CallFilters>(key: K, value: CallFilters[K]) {
     setFilters((current) => ({ ...current, [key]: value }));
   }
@@ -204,19 +217,27 @@ function CallsTab({ calls, filters, setFilters, onOpenCall }: { calls: CallRecor
         <div className="filters-grid">
           <label>Период с<input type="date" value={filters.dateFrom} onChange={(e) => setFilter("dateFrom", e.target.value)} /></label>
           <label>Период по<input type="date" value={filters.dateTo} onChange={(e) => setFilter("dateTo", e.target.value)} /></label>
-          <label>Клиент<input value={filters.client} onChange={(e) => setFilter("client", e.target.value)} placeholder="Имя или телефон" /></label>
-          <label>Компания<input value={filters.company} onChange={(e) => setFilter("company", e.target.value)} placeholder="Компания" /></label>
-          <label>Статус<input value={filters.status} onChange={(e) => setFilter("status", e.target.value)} placeholder="normalized_status" /></label>
+          <label>Статус<select value={filters.status} onChange={(e) => setFilter("status", e.target.value)}>{statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
           <label>Отвеченные<select value={filters.answered} onChange={(e) => setFilter("answered", e.target.value as CallFilters["answered"])}><option value="">Все</option><option value="answered">Отвеченные</option><option value="not_answered">Неотвеченные</option></select></label>
+          <label>Осмысленный разговор<select value={filters.meaningfulOnly ? "yes" : ""} onChange={(e) => setFilter("meaningfulOnly", e.target.value === "yes")}><option value="">Все</option><option value="yes">Только осмысленные</option></select></label>
           <label>Этап воронки<select value={filters.funnelStage} onChange={(e) => setFilter("funnelStage", e.target.value)}><option value="">Все</option>{funnelStageOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-          <label>Где сорвался<select value={filters.failureStage} onChange={(e) => setFilter("failureStage", e.target.value)}><option value="">Все</option>{failureStageOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
           <label>Встреча назначена<select value={filters.meetingScheduled} onChange={(e) => setFilter("meetingScheduled", e.target.value as CallFilters["meetingScheduled"])}>{yesNoOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
           <label>Квалификация<select value={filters.qualification} onChange={(e) => setFilter("qualification", e.target.value)}><option value="">Все</option>{qualificationOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-          <label>Проверено<select value={filters.checkedByAnalyst} onChange={(e) => setFilter("checkedByAnalyst", e.target.value as CallFilters["checkedByAnalyst"])}>{yesNoOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-          <label>Есть аудио<select value={filters.hasAudio} onChange={(e) => setFilter("hasAudio", e.target.value as CallFilters["hasAudio"])}>{yesNoOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-          <label className="checkbox-label"><input type="checkbox" checked={filters.meaningfulOnly} onChange={(e) => setFilter("meaningfulOnly", e.target.checked)} /> Только осмысленные разговоры</label>
           <button className="secondary-button" onClick={() => setFilters(emptyFilters())}>Сбросить фильтры</button>
         </div>
+        <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)}>{advancedOpen ? "Скрыть расширенные фильтры" : "Расширенные фильтры"}</button>
+        {advancedOpen && (
+          <div className="filters-grid advanced-filters">
+            <label>Клиент<input value={filters.client} onChange={(e) => setFilter("client", e.target.value)} placeholder="Имя или телефон" /></label>
+            <label>Компания<input value={filters.company} onChange={(e) => setFilter("company", e.target.value)} placeholder="Компания" /></label>
+            <label>Где сорвался<select value={filters.failureStage} onChange={(e) => setFilter("failureStage", e.target.value)}><option value="">Все</option>{failureStageOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
+            <label>Причина срыва<input value={filters.failureReason} onChange={(e) => setFilter("failureReason", e.target.value)} placeholder="Причина" /></label>
+            <label>Проверено<select value={filters.checkedByAnalyst} onChange={(e) => setFilter("checkedByAnalyst", e.target.value as CallFilters["checkedByAnalyst"])}>{yesNoOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+            <label>Есть аудио<select value={filters.hasAudio} onChange={(e) => setFilter("hasAudio", e.target.value as CallFilters["hasAudio"])}>{yesNoOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+            <label>Квалификация эксперта<select value={filters.manualQualification} onChange={(e) => setFilter("manualQualification", e.target.value)}><option value="">Все</option>{qualificationOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
+            <label className="checkbox-label"><input type="checkbox" checked={filters.lowConfidence} onChange={(e) => setFilter("lowConfidence", e.target.checked)} /> Низкая уверенность AI</label>
+          </div>
+        )}
         {filters.funnelNode && <div className="active-filter">Фильтр воронки: {stageLabels[filters.funnelNode] || filters.funnelNode}</div>}
       </section>
 
@@ -236,6 +257,7 @@ function CallsTab({ calls, filters, setFilters, onOpenCall }: { calls: CallRecor
                 <th>Встреча назначена</th>
                 <th>Время созвона с экспертом</th>
                 <th>Квалификация</th>
+                <th>Квалификация эксперта</th>
                 <th>Проверено</th>
                 <th>Аудио</th>
                 <th>Подробнее</th>
@@ -253,7 +275,8 @@ function CallsTab({ calls, filters, setFilters, onOpenCall }: { calls: CallRecor
                   <td>{call.manualFailureStage || call.failureStage || ""}</td>
                   <td>{call.meetingScheduled ? "Да" : "Нет"}</td>
                   <td>{call.expertCallTime || ""}</td>
-                  <td>{call.manualQualification || call.qualification || ""}</td>
+                  <td>{call.qualification || ""}</td>
+                  <td>{call.manualQualification || ""}</td>
                   <td>{call.checkedByAnalyst ? "Да" : "Нет"}</td>
                   <td>{call.audioUrl ? <a href={call.audioUrl} onClick={(e) => e.stopPropagation()} target="_blank" rel="noreferrer">audio</a> : ""}</td>
                   <td><button className="link-button" onClick={(e) => { e.stopPropagation(); onOpenCall(call); }}>Открыть</button></td>
@@ -269,7 +292,7 @@ function CallsTab({ calls, filters, setFilters, onOpenCall }: { calls: CallRecor
 }
 
 function StatusPill({ value }: { value?: string }) {
-  return <span className="status-pill">{value || ""}</span>;
+  return <span className="status-pill">{formatStatus(value)}</span>;
 }
 
 function CallDrawer({ call, onClose, onSaved }: { call: CallRecord; onClose: () => void; onSaved: (call: CallRecord) => void }) {

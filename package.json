@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "prepare:data": "node scripts/prepare-data.mjs",
+    "test:classifier": "node scripts/test-classifier.mjs",
     "predev": "npm run prepare:data",
     "dev": "vite --host 0.0.0.0",
     "prebuild": "npm run prepare:data",

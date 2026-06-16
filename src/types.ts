@@ -5,12 +5,19 @@ export type FunnelNodeId =
   | "not_answered"
   | "answered"
   | "empty_dial"
+  | "bot_monologue"
   | "meaningful"
+  | "greeting_lost"
   | "greeting_passed"
+  | "offer_lost"
   | "offer_revealed"
+  | "meeting_offer_lost"
   | "meeting_offered"
+  | "meeting_not_scheduled"
   | "meeting_scheduled"
+  | "qualification_not_done"
   | "qualification_done"
+  | "not_hot_lead"
   | "hot_lead";
 
 export type TranscriptMessage = {
@@ -41,6 +48,14 @@ export type CallRecord = {
   aiComment?: string;
   answered?: boolean;
   meaningfulConversation?: boolean;
+  botMonologueOrIgnored?: boolean;
+  stageRank?: number;
+  wasOfferExplained?: boolean;
+  wasMeetingOffered?: boolean;
+  wasMeetingScheduled?: boolean;
+  wasQualificationAttempted?: boolean;
+  wasQualificationCompleted?: boolean;
+  isHotLead?: boolean;
   meetingOffered?: boolean;
   meetingScheduled?: boolean;
   expertCallTime?: string;
@@ -68,10 +83,13 @@ export type CallFilters = {
   meaningfulOnly: boolean;
   funnelStage: string;
   failureStage: string;
+  failureReason: string;
   meetingScheduled: "" | "yes" | "no";
   qualification: string;
   checkedByAnalyst: "" | "yes" | "no";
   hasAudio: "" | "yes" | "no";
+  lowConfidence: boolean;
+  manualQualification: string;
   funnelNode?: FunnelNodeId;
 };
 
@@ -85,25 +103,28 @@ export type FunnelNode = {
   id: FunnelNodeId;
   label: string;
   count: number;
+  kind?: "total" | "success" | "loss" | "warning" | "neutral";
   helper?: string;
   children?: FunnelNode[];
 };
 
 export type LossRow = {
   stage: string;
-  reason: string;
   count: number;
   share: number;
+  recommendation: string;
 };
 
-export type ReviewQueueItem = {
-  call: CallRecord;
-  reasons: string[];
+export type ReviewFocusItem = {
+  label: string;
+  count: number;
+  share: number;
+  recommendation: string;
 };
 
 export type AnalyticsSnapshot = {
   kpis: KpiMetric[];
   funnel: FunnelNode;
   losses: LossRow[];
-  reviewQueue: ReviewQueueItem[];
+  reviewFocus: ReviewFocusItem[];
 };
