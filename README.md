@@ -149,6 +149,8 @@ Frontend использует REST API с базовым URL из перемен
 
 Если переменная не задана, используется `/api`.
 
+Для статического деплоя на GitHub Pages есть fallback-источник данных: файл `calls_week_anon.xlsx` конвертируется в `public/calls.json` скриптом `npm run prepare:data`. Если backend API недоступен, frontend автоматически загружает этот JSON и работает с реальными данными из XLSX.
+
 Используемые endpoints:
 
 - `GET /api/calls` - список звонков
@@ -196,6 +198,8 @@ Production build:
 ```bash
 npm run build
 ```
+
+Перед `dev` и `build` автоматически запускается `npm run prepare:data`, который обновляет статический JSON из `calls_week_anon.xlsx`.
 
 Preview production build:
 

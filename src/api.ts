@@ -1,6 +1,8 @@
 import type { CallFilters, CallRecord, RawCallRecord } from "./types";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/$/, "");
+const STATIC_CALLS_URL = `${import.meta.env.BASE_URL}calls.json`;
+const LOCAL_REVIEWS_KEY = "botamin_analyst_reviews";
 
 type RequestOptions = RequestInit & { allowNotFound?: boolean };
 
@@ -27,6 +29,35 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 
   return response.json() as Promise<T>;
+}
+
+function getLocalReviews(): Record<string, AnalystReviewPayload> {
+  try {
+    return JSON.parse(localStorage.getItem(LOCAL_REVIEWS_KEY) || "{}") as Record<string, AnalystReviewPayload>;
+  } catch {
+    return {};
+  }
+}
+
+function setLocalReview(id: string, payload: AnalystReviewPayload) {
+  const reviews = getLocalReviews();
+  reviews[id] = payload;
+  localStorage.setItem(LOCAL_REVIEWS_KEY, JSON.stringify(reviews));
+}
+
+function applyLocalReview(call: CallRecord): CallRecord {
+  const review = getLocalReviews()[call.id];
+  if (!review) return call;
+  return {
+    ...call,
+    qualificationIsCorrect: review.qualification_is_correct,
+    manualQualification: review.manual_qualification,
+    manualFunnelStage: review.manual_funnel_stage,
+    manualFailureStage: review.manual_failure_stage,
+    manualFailureReason: review.manual_failure_reason,
+    analystComment: review.analyst_comment,
+    checkedByAnalyst: true,
+  };
 }
 
 function firstString(raw: RawCallRecord, keys: string[]): string | undefined {
@@ -170,6 +201,14 @@ export function normalizeCall(raw: RawCallRecord): CallRecord {
   };
 }
 
+async function fetchStaticCalls(): Promise<CallRecord[]> {
+  const response = await fetch(STATIC_CALLS_URL, { headers: { Accept: "application/json" } });
+  if (!response.ok) throw new Error(`Static calls data is unavailable: ${response.status}`);
+  const data = (await response.json()) as RawCallRecord[] | { items?: RawCallRecord[]; calls?: RawCallRecord[]; data?: RawCallRecord[] };
+  const items = Array.isArray(data) ? data : data.items || data.calls || data.data || [];
+  return items.map(normalizeCall).map(applyLocalReview);
+}
+
 function filtersToQuery(filters?: Partial<CallFilters>): string {
   if (!filters) return "";
   const params = new URLSearchParams();
@@ -182,14 +221,23 @@ function filtersToQuery(filters?: Partial<CallFilters>): string {
 }
 
 export async function fetchCalls(filters?: Partial<CallFilters>): Promise<CallRecord[]> {
-  const data = await request<RawCallRecord[] | { items?: RawCallRecord[]; calls?: RawCallRecord[]; data?: RawCallRecord[] }>(`/calls${filtersToQuery(filters)}`);
-  const items = Array.isArray(data) ? data : data.items || data.calls || data.data || [];
-  return items.map(normalizeCall);
+  try {
+    const data = await request<RawCallRecord[] | { items?: RawCallRecord[]; calls?: RawCallRecord[]; data?: RawCallRecord[] }>(`/calls${filtersToQuery(filters)}`);
+    const items = Array.isArray(data) ? data : data.items || data.calls || data.data || [];
+    return items.map(normalizeCall).map(applyLocalReview);
+  } catch {
+    return fetchStaticCalls();
+  }
 }
 
 export async function fetchCall(id: string): Promise<CallRecord | undefined> {
-  const data = await request<RawCallRecord | undefined>(`/calls/${encodeURIComponent(id)}`, { allowNotFound: true });
-  return data ? normalizeCall(data) : undefined;
+  try {
+    const data = await request<RawCallRecord | undefined>(`/calls/${encodeURIComponent(id)}`, { allowNotFound: true });
+    return data ? applyLocalReview(normalizeCall(data)) : undefined;
+  } catch {
+    const calls = await fetchStaticCalls().catch(() => []);
+    return calls.find((call) => call.id === id);
+  }
 }
 
 export type AnalystReviewPayload = {
@@ -202,9 +250,14 @@ export type AnalystReviewPayload = {
 };
 
 export async function saveAnalystReview(id: string, payload: AnalystReviewPayload): Promise<CallRecord | undefined> {
-  const data = await request<RawCallRecord | undefined>(`/calls/${encodeURIComponent(id)}/analyst-review`, {
-    method: "PATCH",
-    body: JSON.stringify(payload),
-  });
-  return data ? normalizeCall(data) : undefined;
+  try {
+    const data = await request<RawCallRecord | undefined>(`/calls/${encodeURIComponent(id)}/analyst-review`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    return data ? applyLocalReview(normalizeCall(data)) : undefined;
+  } catch {
+    setLocalReview(id, payload);
+    return undefined;
+  }
 }

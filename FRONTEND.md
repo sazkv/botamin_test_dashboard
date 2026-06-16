@@ -15,6 +15,8 @@ npm run dev
 VITE_API_BASE_URL=http://localhost:8000/api
 ```
 
+Если API недоступен, frontend использует статический fallback `calls.json`, который генерируется из `calls_week_anon.xlsx` командой `npm run prepare:data`.
+
 Production build:
 
 ```bash
