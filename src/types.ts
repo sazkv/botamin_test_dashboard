@@ -1,7 +1,23 @@
 export type TabId = "dashboard" | "calls";
 
+export type CallOutcome =
+  | "no_answer"
+  | "dropped_or_voicemail"
+  | "bot_monologue_ignored"
+  | "conversation_happened_not_interested"
+  | "conversation_happened_callback"
+  | "conversation_happened_interested"
+  | "meeting_scheduled";
+
 export type FunnelNodeId =
   | "total"
+  | "no_answer"
+  | "dropped_or_voicemail"
+  | "bot_monologue_ignored"
+  | "conversation_happened"
+  | "conversation_happened_not_interested"
+  | "conversation_happened_callback"
+  | "conversation_happened_interested"
   | "not_answered"
   | "answered"
   | "empty_dial"
@@ -36,6 +52,7 @@ export type CallRecord = {
   durationSeconds?: number;
   normalizedStatus?: string;
   technicalStatus?: string;
+  callOutcome?: CallOutcome;
   audioUrl?: string;
   endReason?: string;
   result?: string;
@@ -64,6 +81,7 @@ export type CallRecord = {
   qualificationIsCorrect?: boolean | null;
   checkedByAnalyst?: boolean;
   manualQualification?: string;
+  manualCallOutcome?: CallOutcome | "";
   manualFunnelStage?: string;
   manualFailureStage?: string;
   manualFailureReason?: string;
@@ -109,22 +127,37 @@ export type FunnelNode = {
 };
 
 export type LossRow = {
+  id: FunnelNodeId;
   stage: string;
+  description: string;
   count: number;
+  parentCount: number;
   share: number;
+  color: string;
   recommendation: string;
 };
 
-export type ReviewFocusItem = {
+export type GrowthOpportunity = {
+  id: FunnelNodeId;
+  title: string;
+  text: string;
+  count: number;
+  parentCount: number;
+  lossRate: number;
+};
+
+export type ConversationFunnelStep = {
+  id: FunnelNodeId;
   label: string;
   count: number;
-  share: number;
-  recommendation: string;
+  parentCount: number;
+  color: string;
 };
 
 export type AnalyticsSnapshot = {
   kpis: KpiMetric[];
   funnel: FunnelNode;
+  conversationFunnel: ConversationFunnelStep[];
   losses: LossRow[];
-  reviewFocus: ReviewFocusItem[];
+  growthOpportunity: GrowthOpportunity | null;
 };

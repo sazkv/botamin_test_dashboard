@@ -97,6 +97,8 @@ export function isSubstantiveReply(text) {
     "встреч",
     "созвон",
     "сколько стоит",
+    "что вы предлагаете",
+    "что предлагаете",
     "цена",
     "стоимость",
     "подума",
@@ -106,24 +108,29 @@ export function isSubstantiveReply(text) {
 }
 
 function isNegativeReply(text) {
-  return hasToken(text, ["не интересно", "не надо", "не нужен", "не звон", "откаж", "нет,", "нет ", "до свид"]);
+  return hasToken(text, ["не интересно", "неинтерес", "не интерес", "не интересует", "не заинтерес", "не было бы интересно", "не надо", "не нужен", "не нужно", "нам не нужно", "не актуально", "не по адресу", "не звон", "откаж", "нет,", "нет ", "до свид"]);
 }
 
-function isCallbackOrMaterialsReply(text) {
-  return hasToken(text, ["пришлите", "пришли", "отправ", "перезвон", "потом", "не сейчас", "подума"]);
+function isCallbackReply(text) {
+  return hasToken(text, ["перезвон", "потом", "позже", "не сейчас", "подума", "напишите позже", "свяжитесь позже", "передам", "передад", "что передать", "что ему передать", "что передадим", "записал ваше сообщение", "отправил его абоненту"]);
+}
+
+function isInterestedReply(text) {
+  return !isNegativeReply(text) && !isCallbackReply(text) && hasToken(text, ["мне интерес", "было бы интерес", "ну интересно", "это интересно", "пришлите", "пришли", "отправьте", "информац", "сколько", "цена", "стоимость", "что вы предлагаете", "что предлагаете", "суть понять"]);
 }
 
 function isPositiveSchedulingReply(text) {
-  if (isNegativeReply(text) || isCallbackOrMaterialsReply(text)) return false;
-  const hasAgreement = hasToken(text, ["давайте", "да", "соглас", "можно", "подойдет", "подходит", "готов", "ок", "хорошо", "удобно"]);
+  if (!isSubstantiveReply(text) || isNegativeReply(text) || isCallbackReply(text)) return false;
+  const hasAgreement = hasToken(text, ["давайте", "да", "соглас", "можно", "подойдет", "подходит", "готов", "ок", "хорошо", "удобно", "запишите"]);
   const hasTime = hasToken(text, ["сегодня", "завтра", "после обеда", "утром", "вечером", "понедельник", "вторник", "сред", "четверг", "пятниц", "час", "минут", ":"])
     || /\b\d{1,2}[.:]\d{2}\b/.test(text)
     || /\bв\s*\d{1,2}\b/.test(text);
-  return hasAgreement && hasTime;
+  const explicitNoTimeAgreement = hasToken(text, ["запишите", "договорились", "соединяйте", "пусть эксперт", "пусть менеджер", "пусть человек свяжется", "пусть человек позвонит", "эксперт позвонит"]);
+  return explicitNoTimeAgreement || (hasAgreement && hasTime);
 }
 
 function isHotLeadReply(text) {
-  return !isNegativeReply(text) && !isCallbackOrMaterialsReply(text) && hasToken(text, ["интерес", "давайте", "соглас", "подойдет", "подходит", "готов", "хочу", "можно встреч"]);
+  return !isNegativeReply(text) && !isCallbackReply(text) && hasToken(text, ["интерес", "давайте", "соглас", "подойдет", "подходит", "готов", "хочу", "можно встреч"]);
 }
 
 function findFirstIndex(messages, role, predicate) {
@@ -176,7 +183,21 @@ export function classifyCall(row) {
   const qualificationIndex = findFirstIndex(messages, "bot", (text) => hasToken(text, ["сколько", "менеджер", "заяв", "лид", "crm", "отдел продаж", "команд", "кто отвечает", "кто занимается"]));
   const wasQualificationAttempted = meaningful && qualificationIndex >= 0;
   const wasQualificationCompleted = wasQualificationAttempted && hasUserAfter(messages, qualificationIndex, isSubstantiveReply);
-  const isHotLead = wasMeetingScheduled || (wasMeetingOffered && hasUserAfter(messages, meetingOfferIndex, isHotLeadReply));
+  const joinedUserText = userMessages.map((message) => message.normalized).join(" ");
+  const hasNegative = meaningful && userMessages.some((message) => isNegativeReply(message.normalized));
+  const hasCallback = meaningful && isCallbackReply(joinedUserText);
+  const hasInterest = meaningful && (isInterestedReply(joinedUserText) || hasUserAfter(messages, meetingOfferIndex, isHotLeadReply));
+  const isHotLead = wasMeetingScheduled || hasInterest;
+
+  let callOutcome = "no_answer";
+  if (!hasTranscript) callOutcome = "no_answer";
+  else if (emptyOrVoicemail) callOutcome = "dropped_or_voicemail";
+  else if (isBotMonologue || !meaningful) callOutcome = "bot_monologue_ignored";
+  else if (wasMeetingScheduled) callOutcome = "meeting_scheduled";
+  else if (hasNegative) callOutcome = "conversation_happened_not_interested";
+  else if (hasCallback) callOutcome = "conversation_happened_callback";
+  else if (hasInterest) callOutcome = "conversation_happened_interested";
+  else callOutcome = "conversation_happened_not_interested";
 
   let stageRank = answered ? 1 : 0;
   if (emptyOrVoicemail || isBotMonologue) stageRank = 2;
@@ -207,7 +228,6 @@ export function classifyCall(row) {
   }
   if (isHotLead) {
     stageRank = Math.max(stageRank, 9);
-    if (!wasMeetingScheduled) maxFunnelStage = "hot_lead";
   }
 
   let failureStage = "";
@@ -221,7 +241,7 @@ export function classifyCall(row) {
   } else if (isBotMonologue) {
     failureStage = "consent";
     failureReason = "Клиент не вступил в диалог / тишина после скрипта";
-  } else if (meaningful && userMessages.some((message) => isNegativeReply(message.normalized))) {
+  } else if (hasNegative) {
     failureStage = wasOfferExplained ? "offer" : "greeting";
     failureReason = "Клиент отказался";
   } else if (!greetingPassed) {
@@ -244,7 +264,7 @@ export function classifyCall(row) {
   let qualification = "";
   if (wasMeetingScheduled) qualification = "Назначена встреча";
   else if (isHotLead) qualification = "Горячий";
-  else if (meaningful && isCallbackOrMaterialsReply(userMessages.map((message) => message.normalized).join(" "))) qualification = "Нужен перезвон";
+  else if (hasCallback) qualification = "Нужен перезвон";
 
   const contactType = !answered ? "Нет диалога" : emptyOrVoicemail ? "Пустой дозвон / автоответчик / тишина" : isBotMonologue ? "Бот-монолог / клиент игнорирует" : "Осмысленный разговор";
   const aiSummary = isBotMonologue
@@ -255,6 +275,7 @@ export function classifyCall(row) {
 
   return {
     duration_seconds: duration || undefined,
+    call_outcome: callOutcome,
     normalized_status: normalizedStatus,
     technical_status: row["статус"] || row.technical_status || "",
     answered,

@@ -1,30 +1,21 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { fetchCall, fetchCalls, saveAnalystReview, type AnalystReviewPayload } from "./api";
-import {
-  buildAnalytics,
-  emptyFilters,
-  failureStageOptions,
-  filterCalls,
-  formatDate,
-  formatDateTime,
-  formatDuration,
-  formatStatus,
-  formatTime,
-  funnelStageOptions,
-  qualificationOptions,
-  stageLabels,
-  statusOptions,
-} from "./analytics";
-import type { AnalyticsSnapshot, CallFilters, CallRecord, FunnelNode, FunnelNodeId, TabId } from "./types";
+import { buildAnalytics, emptyFilters, filterCalls, formatDateTime, formatDuration, funnelStageOptions, getCallOutcome, getCallReason, getSalesStage, stageLabels, statusOptions } from "./analytics";
+import { callOutcomeLabel } from "./lib/labels";
+import type { AnalyticsSnapshot, CallFilters, CallOutcome, CallRecord, FunnelNode, FunnelNodeId, TabId } from "./types";
 
-const yesNoOptions = [
-  { value: "", label: "Все" },
-  { value: "yes", label: "Да" },
-  { value: "no", label: "Нет" },
-];
+const outcomeIds = new Set<string>([
+  "no_answer",
+  "dropped_or_voicemail",
+  "bot_monologue_ignored",
+  "conversation_happened_not_interested",
+  "conversation_happened_callback",
+  "conversation_happened_interested",
+  "meeting_scheduled",
+]);
 
 function App() {
-  const [activeTab, setActiveTab] = useState<TabId>("dashboard");
+  const [activeTab, setActiveTab] = useState<TabId>(() => window.location.hash === "#calls" ? "calls" : "dashboard");
   const [filters, setFilters] = useState<CallFilters>(() => emptyFilters());
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [selectedCall, setSelectedCall] = useState<CallRecord | null>(null);
@@ -56,7 +47,7 @@ function App() {
 
   function openCallsWithNode(nodeId: FunnelNodeId) {
     startTransition(() => {
-      setFilters({ ...emptyFilters(), funnelNode: nodeId });
+      setFilters({ ...emptyFilters(), status: outcomeIds.has(nodeId) ? nodeId : "", funnelNode: outcomeIds.has(nodeId) ? undefined : nodeId });
       setActiveTab("calls");
     });
   }
@@ -84,7 +75,7 @@ function App() {
         </div>
         <nav className="nav-tabs" aria-label="Основные разделы">
           <button className={activeTab === "dashboard" ? "active" : ""} onClick={() => setActiveTab("dashboard")}>Dashboard</button>
-          <button className={activeTab === "calls" ? "active" : ""} onClick={() => setActiveTab("calls")}>Calls</button>
+          <button className={activeTab === "calls" ? "active" : ""} onClick={() => setActiveTab("calls")}>Звонки</button>
         </nav>
       </aside>
 
@@ -95,13 +86,13 @@ function App() {
             <h1>{activeTab === "dashboard" ? "Дашборд аналитика" : "Звонки"}</h1>
           </div>
           <div className="header-meta">
-            <span>{calls.length} звонков загружено</span>
-            {filters.funnelNode && <button className="ghost-button" onClick={() => setFilters((current) => ({ ...current, funnelNode: undefined }))}>Сбросить узел воронки</button>}
+            <span>{calls.length.toLocaleString("ru-RU")} звонков загружено</span>
+            {(filters.funnelNode || filters.status) && <button className="ghost-button" onClick={() => setFilters(emptyFilters())}>Сбросить фильтр</button>}
           </div>
         </header>
 
         {error && <div className="error-banner">API error: {error}</div>}
-        {loading && <div className="loading-panel">Загружаем звонки из API...</div>}
+        {loading && <div className="loading-panel">Загружаем звонки...</div>}
 
         {!loading && activeTab === "dashboard" && <Dashboard analytics={analytics} onNodeClick={openCallsWithNode} />}
         {!loading && activeTab === "calls" && <CallsTab calls={filteredCalls} filters={filters} setFilters={setFilters} onOpenCall={openCall} />}
@@ -127,85 +118,122 @@ function Dashboard({ analytics, onNodeClick }: { analytics: AnalyticsSnapshot; o
       <section className="panel funnel-panel">
         <div className="panel-header">
           <div>
-            <h2>Интерактивная карта воронки</h2>
-            <p>Клик по узлу откроет Calls с применённым фильтром.</p>
+            <h2>Интерактивная панель звонков</h2>
+            <p>Дозвон — это ещё не разговор. Клик по узлу откроет вкладку «Звонки».</p>
           </div>
         </div>
-        <FunnelTree node={analytics.funnel} total={analytics.funnel.count} parentCount={analytics.funnel.count} onNodeClick={onNodeClick} root />
+        <OutcomeTree root={analytics.funnel} total={analytics.funnel.count} onNodeClick={onNodeClick} />
+      </section>
+
+      <section className="panel conversation-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Воронка состоявшихся разговоров</h2>
+            <p>Только звонки, где клиент дал содержательную реплику или подтвердил встречу.</p>
+          </div>
+        </div>
+        <ConversationFunnel steps={analytics.conversationFunnel} />
       </section>
 
       <section className="panel">
         <div className="panel-header">
           <div>
             <h2>Где теряем клиентов</h2>
-            <p>Доля считается от осмысленных разговоров.</p>
+            <p>Один звонок попадает только в один итоговый статус.</p>
           </div>
         </div>
-        <div className="loss-list">
-          {analytics.losses.length ? analytics.losses.map((row) => (
-            <div className="loss-row" key={row.stage}>
-              <div>
-                <strong>{row.stage}</strong>
-                <span>{row.recommendation}</span>
-              </div>
-              <div className="loss-bar" aria-hidden="true"><i style={{ width: `${Math.min(row.share * 100, 100)}%` }} /></div>
-              <b>{row.count}</b>
-              <em>{Math.round(row.share * 100)}%</em>
-            </div>
-          )) : <EmptyState text="Нет данных о причинах срыва." />}
-        </div>
-      </section>
-
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <h2>Что проверить аналитику</h2>
-            <p>Агрегированные группы для ручной проверки во вкладке Calls.</p>
-          </div>
-        </div>
-        <div className="focus-list">
-          {analytics.reviewFocus.length ? analytics.reviewFocus.map((item) => (
-            <article className="focus-item" key={item.label}>
-              <div>
-                <strong>{item.label}</strong>
-                <span>{item.recommendation}</span>
-              </div>
-              <b>{item.count.toLocaleString("ru-RU")}</b>
-              <em>{Math.round(item.share * 100)}%</em>
-            </article>
-          )) : <EmptyState text="Приоритетных звонков для ручной проверки нет." />}
+        <div className="loss-card-grid">
+          {analytics.losses.length ? analytics.losses.map((row) => <LossCard row={row} key={row.id} />) : <EmptyState text="Нет данных о причинах срыва." />}
         </div>
       </section>
     </div>
   );
 }
 
-function FunnelTree({ node, total, parentCount, onNodeClick, root = false }: { node: FunnelNode; total: number; parentCount: number; onNodeClick: (nodeId: FunnelNodeId) => void; root?: boolean }) {
-  const parentShare = parentCount ? Math.round((node.count / parentCount) * 100) : 0;
-  const totalShare = total ? Math.round((node.count / total) * 100) : 0;
+function OutcomeTree({ root, total, onNodeClick }: { root: FunnelNode; total: number; onNodeClick: (nodeId: FunnelNodeId) => void }) {
+  const nodes = new Map<FunnelNodeId, { node: FunnelNode; parentCount: number }>();
+
+  function collect(node: FunnelNode, parentCount: number) {
+    nodes.set(node.id, { node, parentCount });
+    node.children?.forEach((child) => collect(child, node.count));
+  }
+  collect(root, total);
+
+  const card = (id: FunnelNodeId, className: string) => {
+    const item = nodes.get(id);
+    return item ? <OutcomeCard className={className} node={item.node} total={total} parentCount={item.parentCount} onNodeClick={onNodeClick} /> : null;
+  };
+
   return (
-    <div className={root ? "funnel-tree root" : "funnel-tree"}>
-      <button className={`funnel-node ${node.kind || "neutral"} node-${node.id}`} onClick={() => onNodeClick(node.id)}>
-        <span>{node.label}</span>
-        <strong>{node.count.toLocaleString("ru-RU")}</strong>
-        <small>{parentShare}% от родителя · {totalShare}% от всех</small>
-      </button>
-      {node.children && (
-        <div className="funnel-children">
-          {node.children.map((child) => (
-            <div className="funnel-edge" key={child.id}>
-              <span className={child.kind === "loss" ? "edge-loss" : ""}>{node.count ? Math.round((child.count / node.count) * 100) || 0 : 0}%</span>
-              <FunnelTree node={child} total={total} parentCount={node.count} onNodeClick={onNodeClick} />
-            </div>
-          ))}
-        </div>
-      )}
+    <div className="outcome-map">
+      {card("total", "pos-total")}
+      {card("no_answer", "pos-no-answer")}
+      {card("answered", "pos-answered")}
+      {card("dropped_or_voicemail", "pos-dropped")}
+      {card("bot_monologue_ignored", "pos-bot")}
+      {card("conversation_happened", "pos-conversation")}
+      {card("conversation_happened_not_interested", "pos-not-interested")}
+      {card("conversation_happened_callback", "pos-callback")}
+      {card("conversation_happened_interested", "pos-interested")}
+      {card("meeting_scheduled", "pos-meeting")}
     </div>
   );
+}
+
+function OutcomeCard({ node, total, parentCount, onNodeClick, className }: { node: FunnelNode; total: number; parentCount: number; onNodeClick: (nodeId: FunnelNodeId) => void; className: string }) {
+  const parentShare = parentCount ? node.count / parentCount : 1;
+  const totalShare = total ? node.count / total : 0;
+  return (
+    <button className={`outcome-node outcome-${node.id} ${className}`} onClick={() => onNodeClick(node.id)}>
+      <span>{node.label}</span>
+      <strong>{node.count.toLocaleString("ru-RU")}</strong>
+      <small>{formatPercent(parentShare)} от родителя</small>
+      <small>{formatPercent(totalShare)} от всех</small>
+    </button>
+  );
+}
+
+function ConversationFunnel({ steps }: { steps: AnalyticsSnapshot["conversationFunnel"] }) {
+  return (
+    <div className="conversation-funnel">
+      {steps.map((step, index) => {
+        const share = step.parentCount ? step.count / step.parentCount : 0;
+        return (
+          <article className={`conversation-step flow-${step.color}`} key={step.id}>
+            <span>{step.label}</span>
+            <strong>{step.count.toLocaleString("ru-RU")}</strong>
+            <small>{index === 0 ? "100% базы блока" : `${formatPercent(share)} от предыдущего`}</small>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function LossCard({ row }: { row: AnalyticsSnapshot["losses"][number] }) {
+  return (
+    <article className={`loss-card loss-${row.color}`}>
+      <div className="loss-card-topline">
+        <span aria-hidden="true" />
+        <b>{row.count.toLocaleString("ru-RU")}</b>
+      </div>
+      <strong>{row.stage}</strong>
+      <p>{row.description}</p>
+      <div className="loss-card-meta">
+        <em>{formatPercent(row.share)} от родителя</em>
+        <small>из {row.parentCount.toLocaleString("ru-RU")}</small>
+      </div>
+      <footer>{row.recommendation}</footer>
+    </article>
+  );
+}
+
+function formatPercent(value: number) {
+  return `${Math.round(value * 1000) / 10}%`;
 }
 
 function CallsTab({ calls, filters, setFilters, onOpenCall }: { calls: CallRecord[]; filters: CallFilters; setFilters: Dispatch<SetStateAction<CallFilters>>; onOpenCall: (call: CallRecord) => void }) {
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const visibleCalls = calls.slice(0, 200);
 
   function setFilter<K extends keyof CallFilters>(key: K, value: CallFilters[K]) {
     setFilters((current) => ({ ...current, [key]: value }));
@@ -214,72 +242,45 @@ function CallsTab({ calls, filters, setFilters, onOpenCall }: { calls: CallRecor
   return (
     <div className="calls-layout">
       <section className="panel filters-panel">
-        <div className="filters-grid">
-          <label>Период с<input type="date" value={filters.dateFrom} onChange={(e) => setFilter("dateFrom", e.target.value)} /></label>
-          <label>Период по<input type="date" value={filters.dateTo} onChange={(e) => setFilter("dateTo", e.target.value)} /></label>
-          <label>Статус<select value={filters.status} onChange={(e) => setFilter("status", e.target.value)}>{statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-          <label>Отвеченные<select value={filters.answered} onChange={(e) => setFilter("answered", e.target.value as CallFilters["answered"])}><option value="">Все</option><option value="answered">Отвеченные</option><option value="not_answered">Неотвеченные</option></select></label>
-          <label>Осмысленный разговор<select value={filters.meaningfulOnly ? "yes" : ""} onChange={(e) => setFilter("meaningfulOnly", e.target.value === "yes")}><option value="">Все</option><option value="yes">Только осмысленные</option></select></label>
-          <label>Этап воронки<select value={filters.funnelStage} onChange={(e) => setFilter("funnelStage", e.target.value)}><option value="">Все</option>{funnelStageOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-          <label>Встреча назначена<select value={filters.meetingScheduled} onChange={(e) => setFilter("meetingScheduled", e.target.value as CallFilters["meetingScheduled"])}>{yesNoOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-          <label>Квалификация<select value={filters.qualification} onChange={(e) => setFilter("qualification", e.target.value)}><option value="">Все</option>{qualificationOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
+        <div className="filters-grid simple-filters">
+          <label>Период с<input type="date" value={filters.dateFrom} onChange={(event) => setFilter("dateFrom", event.target.value)} /></label>
+          <label>Период по<input type="date" value={filters.dateTo} onChange={(event) => setFilter("dateTo", event.target.value)} /></label>
+          <label>Клиент<input value={filters.client} onChange={(event) => setFilter("client", event.target.value)} placeholder="Имя или телефон" /></label>
+          <label>Статус<select value={filters.status} onChange={(event) => setFilter("status", event.target.value)}>{statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+          <label>Этап<select value={filters.funnelStage} onChange={(event) => setFilter("funnelStage", event.target.value)}><option value="">Все</option>{funnelStageOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
+          <label>Есть аудио<select value={filters.hasAudio} onChange={(event) => setFilter("hasAudio", event.target.value as CallFilters["hasAudio"])}><option value="">Все</option><option value="yes">Да</option><option value="no">Нет</option></select></label>
           <button className="secondary-button" onClick={() => setFilters(emptyFilters())}>Сбросить фильтры</button>
         </div>
-        <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)}>{advancedOpen ? "Скрыть расширенные фильтры" : "Расширенные фильтры"}</button>
-        {advancedOpen && (
-          <div className="filters-grid advanced-filters">
-            <label>Клиент<input value={filters.client} onChange={(e) => setFilter("client", e.target.value)} placeholder="Имя или телефон" /></label>
-            <label>Компания<input value={filters.company} onChange={(e) => setFilter("company", e.target.value)} placeholder="Компания" /></label>
-            <label>Где сорвался<select value={filters.failureStage} onChange={(e) => setFilter("failureStage", e.target.value)}><option value="">Все</option>{failureStageOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-            <label>Причина срыва<input value={filters.failureReason} onChange={(e) => setFilter("failureReason", e.target.value)} placeholder="Причина" /></label>
-            <label>Проверено<select value={filters.checkedByAnalyst} onChange={(e) => setFilter("checkedByAnalyst", e.target.value as CallFilters["checkedByAnalyst"])}>{yesNoOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-            <label>Есть аудио<select value={filters.hasAudio} onChange={(e) => setFilter("hasAudio", e.target.value as CallFilters["hasAudio"])}>{yesNoOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-            <label>Квалификация эксперта<select value={filters.manualQualification} onChange={(e) => setFilter("manualQualification", e.target.value)}><option value="">Все</option>{qualificationOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-            <label className="checkbox-label"><input type="checkbox" checked={filters.lowConfidence} onChange={(e) => setFilter("lowConfidence", e.target.checked)} /> Низкая уверенность AI</label>
-          </div>
-        )}
-        {filters.funnelNode && <div className="active-filter">Фильтр воронки: {stageLabels[filters.funnelNode] || filters.funnelNode}</div>}
+        {filters.funnelNode && <div className="active-filter">Фильтр воронки: {stageLabels[filters.funnelNode] || "Требует проверки"}</div>}
       </section>
 
       <section className="panel table-panel">
-        <div className="table-meta">Показано {calls.length.toLocaleString("ru-RU")} звонков</div>
+        <div className="table-meta">Показано {visibleCalls.length.toLocaleString("ru-RU")} из {calls.length.toLocaleString("ru-RU")} звонков</div>
         <div className="table-scroll">
           <table>
             <thead>
               <tr>
                 <th>Клиент</th>
-                <th>Дата звонка</th>
-                <th>Время звонка</th>
-                <th>Компания</th>
+                <th>Дата и время</th>
+                <th>Длительность</th>
                 <th>Статус</th>
-                <th>Этап воронки</th>
-                <th>Где сорвался</th>
-                <th>Встреча назначена</th>
-                <th>Время созвона с экспертом</th>
-                <th>Квалификация</th>
-                <th>Квалификация эксперта</th>
-                <th>Проверено</th>
+                <th>Этап</th>
+                <th>Причина</th>
                 <th>Аудио</th>
                 <th>Подробнее</th>
               </tr>
             </thead>
             <tbody>
-              {calls.map((call) => (
+              {visibleCalls.map((call) => (
                 <tr key={call.id} onClick={() => onOpenCall(call)}>
                   <td><strong>{call.client}</strong></td>
-                  <td>{formatDate(call.callStartedAt)}</td>
-                  <td>{formatTime(call.callStartedAt)}</td>
-                  <td>{call.company || ""}</td>
-                  <td><StatusPill value={call.normalizedStatus} /></td>
-                  <td>{call.manualFunnelStage || call.maxFunnelStage || call.funnelStage || ""}</td>
-                  <td>{call.manualFailureStage || call.failureStage || ""}</td>
-                  <td>{call.meetingScheduled ? "Да" : "Нет"}</td>
-                  <td>{call.expertCallTime || ""}</td>
-                  <td>{call.qualification || ""}</td>
-                  <td>{call.manualQualification || ""}</td>
-                  <td>{call.checkedByAnalyst ? "Да" : "Нет"}</td>
-                  <td>{call.audioUrl ? <a href={call.audioUrl} onClick={(e) => e.stopPropagation()} target="_blank" rel="noreferrer">audio</a> : ""}</td>
-                  <td><button className="link-button" onClick={(e) => { e.stopPropagation(); onOpenCall(call); }}>Открыть</button></td>
+                  <td>{formatDateTime(call.callStartedAt)}</td>
+                  <td>{formatDuration(call.durationSeconds)}</td>
+                  <td><StatusPill call={call} /></td>
+                  <td>{getSalesStage(call)}</td>
+                  <td>{getCallReason(call)}</td>
+                  <td>{call.audioUrl ? <a href={call.audioUrl} onClick={(event) => event.stopPropagation()} target="_blank" rel="noreferrer">Аудио</a> : ""}</td>
+                  <td><button className="link-button" onClick={(event) => { event.stopPropagation(); onOpenCall(call); }}>Открыть</button></td>
                 </tr>
               ))}
             </tbody>
@@ -291,17 +292,17 @@ function CallsTab({ calls, filters, setFilters, onOpenCall }: { calls: CallRecor
   );
 }
 
-function StatusPill({ value }: { value?: string }) {
-  return <span className="status-pill">{formatStatus(value)}</span>;
+function StatusPill({ call }: { call: CallRecord }) {
+  const outcome = getCallOutcome(call);
+  return <span className={`status-pill status-${outcome}`}>{callOutcomeLabel(outcome)}</span>;
 }
 
 function CallDrawer({ call, onClose, onSaved }: { call: CallRecord; onClose: () => void; onSaved: (call: CallRecord) => void }) {
   const [form, setForm] = useState<AnalystReviewPayload>({
-    qualification_is_correct: call.qualificationIsCorrect ?? null,
-    manual_qualification: call.manualQualification || "",
+    manual_call_outcome: call.manualCallOutcome || "",
     manual_funnel_stage: call.manualFunnelStage || "",
     manual_failure_stage: call.manualFailureStage || "",
-    manual_failure_reason: call.manualFailureReason || call.failureReason || "",
+    manual_failure_reason: call.manualFailureReason || "",
     analyst_comment: call.analystComment || "",
   });
   const [saving, setSaving] = useState(false);
@@ -309,11 +310,10 @@ function CallDrawer({ call, onClose, onSaved }: { call: CallRecord; onClose: () 
 
   useEffect(() => {
     setForm({
-      qualification_is_correct: call.qualificationIsCorrect ?? null,
-      manual_qualification: call.manualQualification || "",
+      manual_call_outcome: call.manualCallOutcome || "",
       manual_funnel_stage: call.manualFunnelStage || "",
       manual_failure_stage: call.manualFailureStage || "",
-      manual_failure_reason: call.manualFailureReason || call.failureReason || "",
+      manual_failure_reason: call.manualFailureReason || "",
       analyst_comment: call.analystComment || "",
     });
   }, [call]);
@@ -329,8 +329,7 @@ function CallDrawer({ call, onClose, onSaved }: { call: CallRecord; onClose: () 
       const saved = await saveAnalystReview(call.id, form);
       onSaved(saved || {
         ...call,
-        qualificationIsCorrect: form.qualification_is_correct,
-        manualQualification: form.manual_qualification,
+        manualCallOutcome: form.manual_call_outcome,
         manualFunnelStage: form.manual_funnel_stage,
         manualFailureStage: form.manual_failure_stage,
         manualFailureReason: form.manual_failure_reason,
@@ -356,40 +355,33 @@ function CallDrawer({ call, onClose, onSaved }: { call: CallRecord; onClose: () 
         </div>
 
         <section className="drawer-section compact-facts">
-          <Fact label="Аудио" value={call.audioUrl ? <a href={call.audioUrl} target="_blank" rel="noreferrer">Открыть запись</a> : ""} />
-          <Fact label="Технический статус" value={call.technicalStatus || ""} />
-          <Fact label="Причина завершения" value={call.endReason || ""} />
+          <Fact label="Статус" value={callOutcomeLabel(getCallOutcome(call))} />
+          <Fact label="Этап" value={getSalesStage(call) || "Требует проверки"} />
+          <Fact label="Причина" value={getCallReason(call)} />
+          <Fact label="Аудио" value={call.audioUrl ? <a href={call.audioUrl} target="_blank" rel="noreferrer">Открыть запись</a> : "Требует проверки"} />
         </section>
 
         <section className="drawer-section">
           <h3>Summary</h3>
           <div className="summary-grid">
-            <Fact label="Итог звонка" value={call.result || ""} />
-            <Fact label="Тип контакта" value={call.contactType || ""} />
-            <Fact label="Максимальный этап" value={call.maxFunnelStage || call.funnelStage || ""} />
-            <Fact label="Где сорвался" value={call.failureStage || ""} />
-            <Fact label="Причина срыва" value={call.failureReason || ""} />
-            <Fact label="AI summary" value={call.aiSummary || ""} wide />
-            <Fact label="AI comment" value={call.aiComment || ""} wide />
+            <Fact label="Summary" value={call.aiSummary || call.result || "Требует проверки"} wide />
           </div>
         </section>
 
         <section className="drawer-section">
-          <h3>Ручная проверка аналитика</h3>
+          <h3>Ручная правка</h3>
           <div className="review-form">
-            <label>qualification_is_correct<select value={form.qualification_is_correct === null ? "" : form.qualification_is_correct ? "yes" : "no"} onChange={(e) => setField("qualification_is_correct", e.target.value === "" ? null : e.target.value === "yes")}><option value="">Не указано</option><option value="yes">Да</option><option value="no">Нет</option></select></label>
-            <label>manual_qualification<select value={form.manual_qualification} onChange={(e) => setField("manual_qualification", e.target.value)}><option value="">Не указано</option>{qualificationOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-            <label>manual_funnel_stage<select value={form.manual_funnel_stage} onChange={(e) => setField("manual_funnel_stage", e.target.value)}><option value="">Не указано</option>{funnelStageOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-            <label>manual_failure_stage<select value={form.manual_failure_stage} onChange={(e) => setField("manual_failure_stage", e.target.value)}><option value="">Не указано</option>{failureStageOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
-            <label>manual_failure_reason<input value={form.manual_failure_reason} onChange={(e) => setField("manual_failure_reason", e.target.value)} placeholder="Причина срыва" /></label>
-            <label className="wide-field">analyst_comment<textarea value={form.analyst_comment} onChange={(e) => setField("analyst_comment", e.target.value)} rows={4} placeholder="Комментарий аналитика" /></label>
+            <label>Статус<select value={form.manual_call_outcome} onChange={(event) => setField("manual_call_outcome", event.target.value as CallOutcome | "")}><option value="">Требует проверки</option>{statusOptions.filter((option) => option.value).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+            <label>Этап<select value={form.manual_funnel_stage} onChange={(event) => setField("manual_funnel_stage", event.target.value)}><option value="">Требует проверки</option>{funnelStageOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
+            <label>Причина<input value={form.manual_failure_reason} onChange={(event) => setField("manual_failure_reason", event.target.value)} placeholder="Короткая причина" /></label>
+            <label className="wide-field">Комментарий<textarea value={form.analyst_comment} onChange={(event) => setField("analyst_comment", event.target.value)} rows={4} placeholder="Комментарий аналитика" /></label>
           </div>
           {saveError && <div className="inline-error">{saveError}</div>}
-          <button className="primary-button" onClick={submit} disabled={saving}>{saving ? "Сохраняем..." : "Save"}</button>
+          <button className="primary-button" onClick={submit} disabled={saving}>{saving ? "Сохраняем..." : "Сохранить"}</button>
         </section>
 
         <section className="drawer-section">
-          <h3>Transcript</h3>
+          <h3>Расшифровка</h3>
           {call.transcript?.length ? (
             <div className="transcript-list">
               {call.transcript.map((message, index) => (
@@ -410,7 +402,7 @@ function Fact({ label, value, wide = false }: { label: string; value: ReactNode;
   return (
     <div className={wide ? "fact wide" : "fact"}>
       <span>{label}</span>
-      <strong>{value || ""}</strong>
+      <strong>{value || "Требует проверки"}</strong>
     </div>
   );
 }

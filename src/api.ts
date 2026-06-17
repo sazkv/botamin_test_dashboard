@@ -1,4 +1,4 @@
-import type { CallFilters, CallRecord, RawCallRecord } from "./types";
+import type { CallFilters, CallOutcome, CallRecord, RawCallRecord } from "./types";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/$/, "");
 const STATIC_CALLS_URL = `${import.meta.env.BASE_URL}calls.json`;
@@ -50,14 +50,28 @@ function applyLocalReview(call: CallRecord): CallRecord {
   if (!review) return call;
   return {
     ...call,
-    qualificationIsCorrect: review.qualification_is_correct,
-    manualQualification: review.manual_qualification,
+    manualCallOutcome: review.manual_call_outcome || review.manualCallOutcome || "",
     manualFunnelStage: review.manual_funnel_stage,
     manualFailureStage: review.manual_failure_stage,
     manualFailureReason: review.manual_failure_reason,
     analystComment: review.analyst_comment,
     checkedByAnalyst: true,
   };
+}
+
+const callOutcomes = new Set<CallOutcome>([
+  "no_answer",
+  "dropped_or_voicemail",
+  "bot_monologue_ignored",
+  "conversation_happened_not_interested",
+  "conversation_happened_callback",
+  "conversation_happened_interested",
+  "meeting_scheduled",
+]);
+
+function firstCallOutcome(raw: RawCallRecord, keys: string[]): CallOutcome | undefined {
+  const value = firstString(raw, keys);
+  return value && callOutcomes.has(value as CallOutcome) ? value as CallOutcome : undefined;
 }
 
 function firstString(raw: RawCallRecord, keys: string[]): string | undefined {
@@ -171,6 +185,7 @@ export function normalizeCall(raw: RawCallRecord): CallRecord {
     durationSeconds: durationSeconds(raw),
     normalizedStatus: firstString(raw, ["normalized_status", "status_normalized", "status", "статус"]),
     technicalStatus: firstString(raw, ["technical_status", "technicalStatus", "provider_status", "raw_status", "статус"]),
+    callOutcome: firstCallOutcome(raw, ["call_outcome", "callOutcome", "manual_call_outcome"]),
     audioUrl: firstString(raw, ["audio_url", "recording_url", "record_url", "audio", "запись аудио"]),
     endReason: firstString(raw, ["end_reason", "hangup_reason", "finish_reason", "причина завершения"]),
     result: firstString(raw, ["result", "call_result", "outcome"]),
@@ -199,6 +214,7 @@ export function normalizeCall(raw: RawCallRecord): CallRecord {
     qualificationIsCorrect: firstBoolean(raw, ["qualification_is_correct", "qualificationCorrect"]) ?? null,
     checkedByAnalyst: firstBoolean(raw, ["checked_by_analyst", "is_checked", "reviewed"]),
     manualQualification: firstString(raw, ["manual_qualification"]),
+    manualCallOutcome: firstCallOutcome(raw, ["manual_call_outcome", "manualCallOutcome"]),
     manualFunnelStage: firstString(raw, ["manual_funnel_stage"]),
     manualFailureStage: firstString(raw, ["manual_failure_stage"]),
     manualFailureReason: firstString(raw, ["manual_failure_reason"]),
@@ -249,12 +265,14 @@ export async function fetchCall(id: string): Promise<CallRecord | undefined> {
 }
 
 export type AnalystReviewPayload = {
-  qualification_is_correct: boolean | null;
-  manual_qualification: string;
+  manual_call_outcome: CallOutcome | "";
   manual_funnel_stage: string;
   manual_failure_stage: string;
   manual_failure_reason: string;
   analyst_comment: string;
+  qualification_is_correct?: boolean | null;
+  manual_qualification?: string;
+  manualCallOutcome?: CallOutcome | "";
 };
 
 export async function saveAnalystReview(id: string, payload: AnalystReviewPayload): Promise<CallRecord | undefined> {
